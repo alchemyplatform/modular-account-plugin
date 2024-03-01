@@ -13,14 +13,14 @@ import {IMultiOwnerPlugin} from "@alchemy/modular-account/src/plugins/owner/IMul
 import {FunctionReference} from "@alchemy/modular-account/src/interfaces/IPluginManager.sol";
 import {FunctionReferenceLib} from "@alchemy/modular-account/src/helpers/FunctionReferenceLib.sol";
 
-import {CounterPlugin} from "../src/CounterPlugin.sol";
+import {SubscriptionPlugin} from "../src/SubscriptionPlugin.sol";
 
 contract CounterTest is Test {
     using ECDSA for bytes32;
 
     IEntryPoint entryPoint;
     UpgradeableModularAccount account1;
-    CounterPlugin counterPlugin;
+    SubscriptionPlugin subscriptionPlugin;
     address owner1;
     uint256 owner1Key;
     address[] public owners;
@@ -59,8 +59,8 @@ contract CounterTest is Test {
 
         // create our counter plugin and grab the manifest hash so we can install it
         // note: plugins are singleton contracts, so we only need to deploy them once
-        counterPlugin = new CounterPlugin();
-        bytes32 manifestHash = keccak256(abi.encode(counterPlugin.pluginManifest()));
+        subscriptionPlugin = new SubscriptionPlugin();
+        bytes32 manifestHash = keccak256(abi.encode(subscriptionPlugin.pluginManifest()));
 
         // we will have a single function dependency for our counter contract: the multi owner user op validation
         // we'll use this to ensure that only an owner can sign a user operation that can successfully increment
@@ -72,20 +72,21 @@ contract CounterTest is Test {
         // install this plugin on the account as the owner
         vm.prank(owner1);
         account1.installPlugin({
-            plugin: address(counterPlugin),
+            plugin: address(subscriptionPlugin),
             manifestHash: manifestHash,
             pluginInstallData: "0x",
             dependencies: dependencies
         });
     }
 
-    function test_Increment() public {
-        // create a user operation which has the calldata to specify we'd like to increment
+    function test_subscribe() public {
+        address service = makeAddr("service");
+
         UserOperation memory userOp = UserOperation({
             sender: address(account1),
             nonce: 0,
             initCode: "",
-            callData: abi.encodeCall(CounterPlugin.increment, ()),
+            callData: abi.encodeCall(SubscriptionPlugin.subscribe, (service, 10)),
             callGasLimit: CALL_GAS_LIMIT,
             verificationGasLimit: VERIFICATION_GAS_LIMIT,
             preVerificationGas: 0,
@@ -100,12 +101,46 @@ contract CounterTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(owner1Key, userOpHash.toEthSignedMessageHash());
         userOp.signature = abi.encodePacked(r, s, v);
 
-        // send our single user operation to increment our count
         UserOperation[] memory userOps = new UserOperation[](1);
         userOps[0] = userOp;
         entryPoint.handleOps(userOps, beneficiary);
 
-        // check that we successfully incremented!
-        assertEq(counterPlugin.count(address(account1)), 1);
+        (uint256 amount,, bool enabled) = subscriptionPlugin.subscriptions(service, address(account1));
+        assertEq(amount, 10);
+        assertEq(enabled, true);
+    }
+
+    function test_collect() public {
+        address service = makeAddr("service");
+
+        UserOperation memory userOp = UserOperation({
+            sender: address(account1),
+            nonce: 0,
+            initCode: "",
+            callData: abi.encodeCall(SubscriptionPlugin.subscribe, (service, 10)),
+            callGasLimit: CALL_GAS_LIMIT,
+            verificationGasLimit: VERIFICATION_GAS_LIMIT,
+            preVerificationGas: 0,
+            maxFeePerGas: 2,
+            maxPriorityFeePerGas: 1,
+            paymasterAndData: "",
+            signature: ""
+        });
+
+        // sign this user operation with the owner, otherwise it will revert due to the multiowner validation
+        bytes32 userOpHash = entryPoint.getUserOpHash(userOp);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(owner1Key, userOpHash.toEthSignedMessageHash());
+        userOp.signature = abi.encodePacked(r, s, v);
+
+        UserOperation[] memory userOps = new UserOperation[](1);
+        userOps[0] = userOp;
+        entryPoint.handleOps(userOps, beneficiary);
+
+        assertEq(service.balance, 0);
+
+        vm.prank(service);
+        skip(4 weeks);
+        subscriptionPlugin.collect(address(account1), 10);
+        assertEq(service.balance, 10);
     }
 }
